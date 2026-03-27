@@ -1,0 +1,41 @@
+package xyz.tcheeric.nap.core;
+
+/**
+ * All NAP v2 error codes matching the TypeScript reference implementation.
+ */
+public enum NapErrorCode {
+
+    NAP_INIT_INVALID_NPUB(false),
+    NAP_INIT_RATE_LIMITED(true),
+    NAP_INIT_INTERNAL(true),
+
+    NAP_COMPLETE_MISSING_AUTH_HEADER(false),
+    NAP_COMPLETE_INVALID_AUTH_SCHEME(false),
+    NAP_COMPLETE_INVALID_EVENT_JSON(false),
+    NAP_COMPLETE_INVALID_KIND(false),
+    NAP_COMPLETE_INVALID_SIGNATURE(false),
+    NAP_COMPLETE_CREATED_AT_OUT_OF_RANGE(true),
+    NAP_COMPLETE_URL_MISMATCH(false),
+    NAP_COMPLETE_METHOD_MISMATCH(false),
+    NAP_COMPLETE_MISSING_PAYLOAD(false),
+    NAP_COMPLETE_PAYLOAD_MISMATCH(false),
+    NAP_COMPLETE_MISSING_CHALLENGE_ID(false),
+    NAP_COMPLETE_UNKNOWN_CHALLENGE(true),
+    NAP_COMPLETE_EXPIRED_CHALLENGE(false),
+    NAP_COMPLETE_REDEEMED_CHALLENGE(false),
+    NAP_COMPLETE_CHALLENGE_MISMATCH(false),
+    NAP_COMPLETE_PRINCIPAL_MISMATCH(false),
+    NAP_COMPLETE_ACL_DENIED(false),
+    NAP_COMPLETE_RATE_LIMITED(true),
+    NAP_COMPLETE_INTERNAL(true);
+
+    private final boolean retryable;
+
+    NapErrorCode(boolean retryable) {
+        this.retryable = retryable;
+    }
+
+    public boolean isRetryable() {
+        return retryable;
+    }
+}
