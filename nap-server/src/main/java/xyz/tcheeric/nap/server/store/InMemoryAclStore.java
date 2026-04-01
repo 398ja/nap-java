@@ -1,7 +1,7 @@
 package xyz.tcheeric.nap.server.store;
 
-import xyz.tcheeric.nap.server.acl.AclRecord;
-import xyz.tcheeric.nap.server.acl.AclStore;
+import xyz.tcheeric.nap.core.AclRecord;
+import xyz.tcheeric.nap.core.AclStore;
 
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;

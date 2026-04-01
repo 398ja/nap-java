@@ -78,7 +78,7 @@ public class NapAuthController {
         }
 
         String authUrl = properties.externalBaseUrl() + "/api/v1/auth/complete";
-        String authorization = request.getHeader("Authorization");
+        String authorization = resolveAuthorization(request, rawBody);
 
         VerifyCompletionOutcome outcome = napServer.verifyCompletion(new VerifyCompletionInput(
                 authorization, "POST", authUrl, rawBody));
@@ -154,5 +154,24 @@ public class NapAuthController {
                 .map(Cookie::getValue)
                 .findFirst()
                 .orElse(null);
+    }
+
+    private String resolveAuthorization(HttpServletRequest request, byte[] rawBody) {
+        String header = request.getHeader("Authorization");
+        if (header != null && !header.isBlank()) {
+            return header;
+        }
+
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> body = objectMapper.readValue(rawBody, Map.class);
+            Object proof = body.get("proof");
+            if (proof instanceof String proofValue && !proofValue.isBlank()) {
+                return proofValue;
+            }
+        } catch (Exception ignored) {
+            // Raw-body validation happens in NapServer; fallback extraction is best effort.
+        }
+        return null;
     }
 }

@@ -12,13 +12,19 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
+import xyz.tcheeric.nap.core.AclDecision;
 import xyz.tcheeric.nap.core.SessionRecord;
-import xyz.tcheeric.nap.server.SessionStore;
+import xyz.tcheeric.nap.server.AclResolver;
+import xyz.tcheeric.nap.core.SessionStore;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Validates NAP session cookies on protected paths and populates Spring SecurityContext.
@@ -28,13 +34,22 @@ public class NapSessionFilter extends OncePerRequestFilter {
     private static final Logger log = LoggerFactory.getLogger(NapSessionFilter.class);
 
     private final SessionStore sessionStore;
+    private final AclResolver aclResolver;
     private final String cookieName;
     private final List<String> protectedPrefixes;
+    private final Duration aclRefreshInterval;
+    private final Map<String, CachedAclDecision> aclCache = new ConcurrentHashMap<>();
 
-    public NapSessionFilter(SessionStore sessionStore, String cookieName, List<String> protectedPrefixes) {
+    public NapSessionFilter(SessionStore sessionStore,
+                            AclResolver aclResolver,
+                            String cookieName,
+                            List<String> protectedPrefixes,
+                            Duration aclRefreshInterval) {
         this.sessionStore = sessionStore;
+        this.aclResolver = aclResolver;
         this.cookieName = cookieName;
         this.protectedPrefixes = protectedPrefixes;
+        this.aclRefreshInterval = aclRefreshInterval;
     }
 
     @Override
@@ -48,27 +63,61 @@ public class NapSessionFilter extends OncePerRequestFilter {
             return;
         }
 
+        if (SecurityContextHolder.getContext().getAuthentication() != null
+                && SecurityContextHolder.getContext().getAuthentication().isAuthenticated()) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
         String sessionId = extractCookie(request);
         if (sessionId == null) {
-            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            filterChain.doFilter(request, response);
             return;
         }
 
-        var session = sessionStore.getByAccessToken(sessionId);
-        if (session.isEmpty()) {
-            // Try by session ID as fallback
-            session = sessionStore.getBySessionId(sessionId);
-        }
+        var session = sessionStore.getBySessionId(sessionId);
 
         if (session.isEmpty()) {
-            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            filterChain.doFilter(request, response);
             return;
         }
 
-        var record = session.get();
-        SecurityContextHolder.getContext().setAuthentication(new NapAuthenticationToken(record));
+        SessionRecord record = session.get();
+        if (isExpired(record)) {
+            sessionStore.revokeBySessionId(record.sessionId(), Instant.now().getEpochSecond());
+            filterChain.doFilter(request, response);
+            return;
+        }
 
-        filterChain.doFilter(request, response);
+        AclDecision aclDecision = resolveAcl(record);
+        if (!aclDecision.allowed()) {
+            log.warn("nap_session_acl_denied pubkey={} session_id={}", record.principalPubkey(), record.sessionId());
+            sessionStore.revokeBySessionId(record.sessionId(), Instant.now().getEpochSecond());
+            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+            return;
+        }
+
+        SessionRecord effectiveRecord = new SessionRecord(
+                record.sessionId(),
+                record.challengeId(),
+                record.accessToken(),
+                record.principalNpub(),
+                record.principalPubkey(),
+                aclDecision.roles(),
+                aclDecision.permissions(),
+                record.issuedAt(),
+                record.expiresAt(),
+                record.revokedAt(),
+                record.stepUpToken(),
+                record.stepUpExpiresAt()
+        );
+
+        SecurityContextHolder.getContext().setAuthentication(new NapAuthenticationToken(effectiveRecord));
+        try {
+            filterChain.doFilter(request, response);
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
     }
 
     private String extractCookie(HttpServletRequest request) {
@@ -80,6 +129,26 @@ public class NapSessionFilter extends OncePerRequestFilter {
                 .orElse(null);
     }
 
+    private boolean isExpired(SessionRecord record) {
+        long now = Instant.now().getEpochSecond();
+        return record.revokedAt() != null || record.expiresAt() <= now;
+    }
+
+    private AclDecision resolveAcl(SessionRecord session) {
+        long now = Instant.now().getEpochSecond();
+        CachedAclDecision cachedDecision = aclCache.get(session.sessionId());
+        if (cachedDecision != null && cachedDecision.validUntilEpochSecond() > now) {
+            return cachedDecision.decision();
+        }
+
+        AclDecision refreshedDecision = aclResolver.resolve(session.principalNpub(), session.principalPubkey());
+        aclCache.put(session.sessionId(), new CachedAclDecision(
+                refreshedDecision,
+                now + aclRefreshInterval.toSeconds()
+        ));
+        return refreshedDecision;
+    }
+
     /**
      * Spring Security authentication token backed by a NAP session.
      */
@@ -87,7 +156,7 @@ public class NapSessionFilter extends OncePerRequestFilter {
         private final SessionRecord session;
 
         public NapAuthenticationToken(SessionRecord session) {
-            super(toAuthorities(session.permissions()));
+            super(toAuthorities(session.roles(), session.permissions()));
             this.session = session;
             setAuthenticated(true);
         }
@@ -110,11 +179,22 @@ public class NapSessionFilter extends OncePerRequestFilter {
             return session.principalPubkey();
         }
 
-        private static Collection<GrantedAuthority> toAuthorities(List<String> permissions) {
-            return permissions.stream()
+        private static Collection<GrantedAuthority> toAuthorities(List<String> roles, List<String> permissions) {
+            return java.util.stream.Stream.concat(
+                            permissions.stream(),
+                            roles.stream().map(NapAuthenticationToken::toRoleAuthority)
+                    )
+                    .distinct()
                     .map(SimpleGrantedAuthority::new)
                     .map(GrantedAuthority.class::cast)
                     .toList();
         }
+
+        private static String toRoleAuthority(String role) {
+            return "ROLE_" + role.toUpperCase();
+        }
+    }
+
+    private record CachedAclDecision(AclDecision decision, long validUntilEpochSecond) {
     }
 }

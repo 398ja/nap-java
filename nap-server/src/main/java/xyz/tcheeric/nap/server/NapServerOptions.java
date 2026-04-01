@@ -1,5 +1,8 @@
 package xyz.tcheeric.nap.server;
 
+import xyz.tcheeric.nap.core.ChallengeStore;
+import xyz.tcheeric.nap.core.SessionStore;
+
 import java.security.SecureRandom;
 import java.time.Clock;
 
@@ -7,6 +10,7 @@ public record NapServerOptions(
         ChallengeStore challengeStore,
         SessionStore sessionStore,
         AclResolver aclResolver,
+        EventReplayGuard eventReplayGuard,
         Clock clock,
         SecureRandom random,
         int challengeTtlSeconds,
@@ -32,6 +36,7 @@ public record NapServerOptions(
         private ChallengeStore challengeStore;
         private SessionStore sessionStore;
         private AclResolver aclResolver;
+        private EventReplayGuard eventReplayGuard = EventReplayGuard.inMemory();
         private Clock clock = Clock.systemUTC();
         private SecureRandom random = new SecureRandom();
         private int challengeTtlSeconds = DEFAULT_CHALLENGE_TTL_SECONDS;
@@ -44,6 +49,7 @@ public record NapServerOptions(
         public Builder challengeStore(ChallengeStore store) { this.challengeStore = store; return this; }
         public Builder sessionStore(SessionStore store) { this.sessionStore = store; return this; }
         public Builder aclResolver(AclResolver resolver) { this.aclResolver = resolver; return this; }
+        public Builder eventReplayGuard(EventReplayGuard replayGuard) { this.eventReplayGuard = replayGuard; return this; }
         public Builder clock(Clock clock) { this.clock = clock; return this; }
         public Builder random(SecureRandom random) { this.random = random; return this; }
         public Builder challengeTtlSeconds(int ttl) { this.challengeTtlSeconds = ttl; return this; }
@@ -57,8 +63,9 @@ public record NapServerOptions(
             if (challengeStore == null) throw new IllegalStateException("challengeStore is required");
             if (sessionStore == null) throw new IllegalStateException("sessionStore is required");
             if (aclResolver == null) aclResolver = new AllowAllAclResolver();
+            if (eventReplayGuard == null) eventReplayGuard = EventReplayGuard.inMemory();
             return new NapServerOptions(
-                    challengeStore, sessionStore, aclResolver, clock, random,
+                    challengeStore, sessionStore, aclResolver, eventReplayGuard, clock, random,
                     challengeTtlSeconds, sessionTtlSeconds, resultCacheTtlSeconds,
                     maxClockSkewSeconds, lowerBoundGraceSeconds, upperBoundGraceSeconds
             );

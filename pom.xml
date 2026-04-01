@@ -6,7 +6,7 @@
 
     <groupId>xyz.tcheeric</groupId>
     <artifactId>nap-java</artifactId>
-    <version>0.23.0</version>
+    <version>0.1.0</version>
     <packaging>pom</packaging>
     <name>NAP Java</name>
     <description>Nostr Authentication Protocol (NAP) v2 Java library — standalone, framework-agnostic implementation with Spring Boot adapter</description>
@@ -27,6 +27,10 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <imani-bom.version>0.23.0</imani-bom.version>
+
+        <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
+        <maven-failsafe-plugin.version>3.2.5</maven-failsafe-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -74,7 +78,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
-                    <version>3.13.0</version>
+                    <version>${maven-compiler-plugin.version}</version>
                     <configuration>
                         <parameters>true</parameters>
                     </configuration>
@@ -82,7 +86,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
-                    <version>3.5.2</version>
+                    <version>${maven-surefire-plugin.version}</version>
                     <configuration>
                         <useModulePath>false</useModulePath>
                     </configuration>
@@ -90,7 +94,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-failsafe-plugin</artifactId>
-                    <version>3.2.5</version>
+                    <version>${maven-failsafe-plugin.version}</version>
                 </plugin>
             </plugins>
         </pluginManagement>

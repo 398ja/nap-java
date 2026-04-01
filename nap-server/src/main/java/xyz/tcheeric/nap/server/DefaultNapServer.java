@@ -4,6 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import xyz.tcheeric.nap.core.*;
+import xyz.tcheeric.nap.core.ChallengeStore;
+import xyz.tcheeric.nap.core.RedeemParams;
+import xyz.tcheeric.nap.core.RedeemResult;
+import xyz.tcheeric.nap.core.SessionStore;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -25,6 +29,12 @@ final class DefaultNapServer implements NapServer {
 
     @Override
     public IssueChallengeResult issueChallenge(IssueChallengeInput input) {
+        if (input.authUrl() == null || input.authUrl().isBlank()) {
+            return new IssueChallengeResult.Failure(
+                    NapErrorCode.NAP_INIT_INTERNAL,
+                    NapErrorCode.NAP_INIT_INTERNAL.isRetryable());
+        }
+
         String pubkey = decodeNpub(input.npub());
         if (pubkey == null) {
             return new IssueChallengeResult.Failure(
@@ -60,6 +70,10 @@ final class DefaultNapServer implements NapServer {
 
     @Override
     public VerifyCompletionOutcome verifyCompletion(VerifyCompletionInput input) {
+        if (input.rawBody() == null) {
+            return VerifyCompletionOutcome.malformed();
+        }
+
         AuthCompleteRequest body = parseAuthCompleteRequest(input.rawBody());
         if (body == null) {
             return VerifyCompletionOutcome.malformed();
@@ -81,6 +95,11 @@ final class DefaultNapServer implements NapServer {
         var challenge = options.challengeStore().get(verified.challengeId()).orElse(null);
         if (challenge == null) {
             return VerifyCompletionOutcome.failure(NapErrorCode.NAP_COMPLETE_UNKNOWN_CHALLENGE);
+        }
+
+        VerifyCompletionOutcome replayOutcome = resolveReplayOutcome(challenge, verified.event().id(), now);
+        if (replayOutcome != null) {
+            return replayOutcome;
         }
 
         if (challenge.expiresAt() < now || challenge.state() == ChallengeState.EXPIRED) {
@@ -105,6 +124,12 @@ final class DefaultNapServer implements NapServer {
         AclDecision aclDecision = options.aclResolver().resolve(challenge.npub(), challenge.pubkey());
         if (!aclDecision.allowed()) {
             return VerifyCompletionOutcome.failure(NapErrorCode.NAP_COMPLETE_ACL_DENIED);
+        }
+
+        if (!options.eventReplayGuard().tryAcquire(verified.event().id())) {
+            log.warn("nap_complete_replay_detected event_id={} challenge_id={}",
+                    verified.event().id(), challenge.challengeId());
+            return VerifyCompletionOutcome.failure(NapErrorCode.NAP_COMPLETE_REDEEMED_CHALLENGE);
         }
 
         SessionRecord session = options.sessionStore().createForChallenge(SessionRecord.create(
@@ -152,6 +177,7 @@ final class DefaultNapServer implements NapServer {
     @Override
     public AuthSuccessResponse toPublicAuthSuccess(SessionRecord session) {
         return new AuthSuccessResponse(
+                "ok",
                 session.accessToken(), "Bearer", session.expiresAt(),
                 new AuthSuccessResponse.Principal(session.principalNpub(), session.principalPubkey()),
                 session.roles(), session.permissions()
@@ -174,6 +200,24 @@ final class DefaultNapServer implements NapServer {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private VerifyCompletionOutcome resolveReplayOutcome(ChallengeRecord challenge, String eventId, long now) {
+        if (challenge.state() != ChallengeState.REDEEMED && challenge.redeemedEventId() == null) {
+            return null;
+        }
+
+        if (eventId.equals(challenge.redeemedEventId())
+                && challenge.redeemedSessionId() != null
+                && (challenge.resultCacheUntil() == null || challenge.resultCacheUntil() >= now)) {
+            var existingSession = options.sessionStore().getBySessionId(challenge.redeemedSessionId());
+            if (existingSession.isPresent()) {
+                return VerifyCompletionOutcome.success(existingSession.get());
+            }
+            return VerifyCompletionOutcome.failure(NapErrorCode.NAP_COMPLETE_INTERNAL);
+        }
+
+        return VerifyCompletionOutcome.failure(NapErrorCode.NAP_COMPLETE_REDEEMED_CHALLENGE);
     }
 
     private String decodeNpub(String npub) {

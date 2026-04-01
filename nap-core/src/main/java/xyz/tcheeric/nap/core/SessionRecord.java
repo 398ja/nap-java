@@ -1,7 +1,11 @@
 package xyz.tcheeric.nap.core;
 
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
+
 import java.util.List;
 
+@JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
 public record SessionRecord(
         String sessionId,
         String challengeId,

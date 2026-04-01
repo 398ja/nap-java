@@ -2,9 +2,9 @@ package xyz.tcheeric.nap.server.store;
 
 import xyz.tcheeric.nap.core.ChallengeRecord;
 import xyz.tcheeric.nap.core.ChallengeState;
-import xyz.tcheeric.nap.server.ChallengeStore;
-import xyz.tcheeric.nap.server.RedeemParams;
-import xyz.tcheeric.nap.server.RedeemResult;
+import xyz.tcheeric.nap.core.ChallengeStore;
+import xyz.tcheeric.nap.core.RedeemParams;
+import xyz.tcheeric.nap.core.RedeemResult;
 
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;

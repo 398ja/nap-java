@@ -1,4 +1,4 @@
-package xyz.tcheeric.nap.server.acl;
+package xyz.tcheeric.nap.core;
 
 import java.util.Optional;
 

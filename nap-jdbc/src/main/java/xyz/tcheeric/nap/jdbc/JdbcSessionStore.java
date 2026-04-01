@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import xyz.tcheeric.nap.core.SessionRecord;
-import xyz.tcheeric.nap.server.SessionStore;
+import xyz.tcheeric.nap.core.SessionStore;
 
 import javax.sql.DataSource;
 import java.sql.Connection;

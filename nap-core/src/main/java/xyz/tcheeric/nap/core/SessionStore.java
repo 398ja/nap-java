@@ -1,6 +1,4 @@
-package xyz.tcheeric.nap.server;
-
-import xyz.tcheeric.nap.core.SessionRecord;
+package xyz.tcheeric.nap.core;
 
 import java.util.Optional;
 

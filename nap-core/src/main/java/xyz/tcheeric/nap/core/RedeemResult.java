@@ -1,4 +1,4 @@
-package xyz.tcheeric.nap.server;
+package xyz.tcheeric.nap.core;
 
 public enum RedeemResult {
     REDEEMED,

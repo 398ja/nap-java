@@ -2,8 +2,8 @@ package xyz.tcheeric.nap.jdbc;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import xyz.tcheeric.nap.server.acl.AclRecord;
-import xyz.tcheeric.nap.server.acl.AclStore;
+import xyz.tcheeric.nap.core.AclRecord;
+import xyz.tcheeric.nap.core.AclStore;
 
 import javax.sql.DataSource;
 import java.sql.Connection;

@@ -1,7 +1,7 @@
 package xyz.tcheeric.nap.server.store;
 
 import xyz.tcheeric.nap.core.SessionRecord;
-import xyz.tcheeric.nap.server.SessionStore;
+import xyz.tcheeric.nap.core.SessionStore;
 
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
