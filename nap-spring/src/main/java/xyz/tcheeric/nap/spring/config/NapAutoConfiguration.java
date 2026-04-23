@@ -60,6 +60,8 @@ public class NapAutoConfiguration {
                 .eventReplayGuard(replayGuardProvider.getIfAvailable(EventReplayGuard::inMemory))
                 .challengeTtlSeconds(properties.challengeTtlSeconds())
                 .sessionTtlSeconds(properties.sessionTtlSeconds())
+                .sessionIdleTtlSeconds(properties.sessionIdleTtlSeconds())
+                .sessionAbsoluteTtlSeconds(properties.sessionAbsoluteTtlSeconds())
                 .resultCacheTtlSeconds(properties.resultCacheTtlSeconds())
                 .maxClockSkewSeconds(properties.maxClockSkewSeconds())
                 .build());
@@ -67,9 +69,10 @@ public class NapAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public NapAuthController napAuthController(NapServer napServer, NapProperties properties,
+    public NapAuthController napAuthController(NapServer napServer, SessionStore sessionStore,
+                                               NapProperties properties,
                                                com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
-        return new NapAuthController(napServer, properties, objectMapper);
+        return new NapAuthController(napServer, sessionStore, properties, objectMapper);
     }
 
     @Bean

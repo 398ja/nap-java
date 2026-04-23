@@ -18,6 +18,17 @@ import java.util.Optional;
 
 /**
  * PostgreSQL-backed SessionStore using plain JDBC.
+ *
+ * <p>Spec 006 adds two columns to {@code nap_sessions}:
+ * <pre>
+ *   ALTER TABLE nap_sessions ADD COLUMN last_activity_at    BIGINT NOT NULL DEFAULT 0;
+ *   ALTER TABLE nap_sessions ADD COLUMN absolute_expiry_at  BIGINT NOT NULL DEFAULT 0;
+ *   UPDATE nap_sessions SET last_activity_at = issued_at,
+ *                           absolute_expiry_at = expires_at
+ *     WHERE last_activity_at = 0 OR absolute_expiry_at = 0;
+ * </pre>
+ * Consumers own their schema — apply this migration before deploying a NAP
+ * server that reads/writes these columns.
  */
 public final class JdbcSessionStore implements SessionStore {
 
@@ -35,8 +46,9 @@ public final class JdbcSessionStore implements SessionStore {
     public SessionRecord createForChallenge(SessionRecord record) {
         String sql = """
                 INSERT INTO nap_sessions (session_id, challenge_id, access_token, principal_npub,
-                    principal_pubkey, roles, permissions, issued_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?)
+                    principal_pubkey, roles, permissions, issued_at, last_activity_at,
+                    expires_at, absolute_expiry_at)
+                VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)
                 ON CONFLICT (challenge_id) DO NOTHING
                 """;
         try (Connection conn = dataSource.getConnection();
@@ -49,7 +61,9 @@ public final class JdbcSessionStore implements SessionStore {
             ps.setString(6, toJson(record.roles()));
             ps.setString(7, toJson(record.permissions()));
             ps.setLong(8, record.issuedAt());
-            ps.setLong(9, record.expiresAt());
+            ps.setLong(9, record.lastActivityAt());
+            ps.setLong(10, record.expiresAt());
+            ps.setLong(11, record.absoluteExpiryAt());
             int rows = ps.executeUpdate();
             if (rows == 0) {
                 // Already exists — return existing
@@ -97,6 +111,32 @@ public final class JdbcSessionStore implements SessionStore {
         }
     }
 
+    @Override
+    public void touch(String sessionId, long newLastActivityAt, long newExpiresAt) {
+        // The UPDATE caps new_expires_at at the stored absolute_expiry_at so the
+        // store never extends a session past its absolute cap, regardless of what
+        // the caller passes. Only rows with no revocation and not-yet-absolute-expired
+        // are updated.
+        String sql = """
+                UPDATE nap_sessions
+                   SET last_activity_at = ?,
+                       expires_at       = LEAST(?, absolute_expiry_at)
+                 WHERE session_id = ?
+                   AND revoked_at IS NULL
+                   AND absolute_expiry_at > ?
+                """;
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, newLastActivityAt);
+            ps.setLong(2, newExpiresAt);
+            ps.setString(3, sessionId);
+            ps.setLong(4, newLastActivityAt);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to touch session", e);
+        }
+    }
+
     private Optional<SessionRecord> findByChallengeId(String challengeId) {
         return findBy("challenge_id", challengeId);
     }
@@ -118,6 +158,13 @@ public final class JdbcSessionStore implements SessionStore {
     }
 
     private SessionRecord mapRow(ResultSet rs) throws SQLException {
+        long issuedAt = rs.getLong("issued_at");
+        long expiresAt = rs.getLong("expires_at");
+        // Back-compat: rows written before spec 006 may have 0 in the new columns.
+        long lastActivityAt = rs.getLong("last_activity_at");
+        if (lastActivityAt == 0) lastActivityAt = issuedAt;
+        long absoluteExpiryAt = rs.getLong("absolute_expiry_at");
+        if (absoluteExpiryAt == 0) absoluteExpiryAt = expiresAt;
         return new SessionRecord(
                 rs.getString("session_id"),
                 rs.getString("challenge_id"),
@@ -126,8 +173,10 @@ public final class JdbcSessionStore implements SessionStore {
                 rs.getString("principal_pubkey"),
                 fromJson(rs.getString("roles")),
                 fromJson(rs.getString("permissions")),
-                rs.getLong("issued_at"),
-                rs.getLong("expires_at"),
+                issuedAt,
+                lastActivityAt,
+                expiresAt,
+                absoluteExpiryAt,
                 rs.getObject("revoked_at") != null ? rs.getLong("revoked_at") : null,
                 rs.getString("step_up_token"),
                 rs.getObject("step_up_expires_at") != null ? rs.getLong("step_up_expires_at") : null

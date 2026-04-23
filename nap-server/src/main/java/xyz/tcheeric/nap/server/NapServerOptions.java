@@ -15,6 +15,8 @@ public record NapServerOptions(
         SecureRandom random,
         int challengeTtlSeconds,
         int sessionTtlSeconds,
+        int sessionIdleTtlSeconds,
+        int sessionAbsoluteTtlSeconds,
         int resultCacheTtlSeconds,
         int maxClockSkewSeconds,
         int lowerBoundGraceSeconds,
@@ -23,6 +25,8 @@ public record NapServerOptions(
 
     public static final int DEFAULT_CHALLENGE_TTL_SECONDS = 60;
     public static final int DEFAULT_SESSION_TTL_SECONDS = 3600;
+    public static final int DEFAULT_SESSION_IDLE_TTL_SECONDS = 900;     // 15 min (spec 006)
+    public static final int DEFAULT_SESSION_ABSOLUTE_TTL_SECONDS = 43200; // 12 h  (spec 006)
     public static final int DEFAULT_RESULT_CACHE_TTL_SECONDS = 30;
     public static final int DEFAULT_MAX_CLOCK_SKEW_SECONDS = 60;
     public static final int DEFAULT_LOWER_BOUND_GRACE_SECONDS = 30;
@@ -41,6 +45,8 @@ public record NapServerOptions(
         private SecureRandom random = new SecureRandom();
         private int challengeTtlSeconds = DEFAULT_CHALLENGE_TTL_SECONDS;
         private int sessionTtlSeconds = DEFAULT_SESSION_TTL_SECONDS;
+        private Integer sessionIdleTtlSeconds;
+        private Integer sessionAbsoluteTtlSeconds;
         private int resultCacheTtlSeconds = DEFAULT_RESULT_CACHE_TTL_SECONDS;
         private int maxClockSkewSeconds = DEFAULT_MAX_CLOCK_SKEW_SECONDS;
         private int lowerBoundGraceSeconds = DEFAULT_LOWER_BOUND_GRACE_SECONDS;
@@ -54,6 +60,8 @@ public record NapServerOptions(
         public Builder random(SecureRandom random) { this.random = random; return this; }
         public Builder challengeTtlSeconds(int ttl) { this.challengeTtlSeconds = ttl; return this; }
         public Builder sessionTtlSeconds(int ttl) { this.sessionTtlSeconds = ttl; return this; }
+        public Builder sessionIdleTtlSeconds(int ttl) { this.sessionIdleTtlSeconds = ttl; return this; }
+        public Builder sessionAbsoluteTtlSeconds(int ttl) { this.sessionAbsoluteTtlSeconds = ttl; return this; }
         public Builder resultCacheTtlSeconds(int ttl) { this.resultCacheTtlSeconds = ttl; return this; }
         public Builder maxClockSkewSeconds(int skew) { this.maxClockSkewSeconds = skew; return this; }
         public Builder lowerBoundGraceSeconds(int grace) { this.lowerBoundGraceSeconds = grace; return this; }
@@ -64,10 +72,16 @@ public record NapServerOptions(
             if (sessionStore == null) throw new IllegalStateException("sessionStore is required");
             if (aclResolver == null) aclResolver = new AllowAllAclResolver();
             if (eventReplayGuard == null) eventReplayGuard = EventReplayGuard.inMemory();
+            // Default policy: when caller didn't set idle/absolute explicitly, derive
+            // from sessionTtlSeconds (pre-006 semantics → fixed TTL, no slide) so
+            // back-compat callers get the old behavior. New callers SHOULD set both.
+            int idleTtl = sessionIdleTtlSeconds != null ? sessionIdleTtlSeconds : sessionTtlSeconds;
+            int absoluteTtl = sessionAbsoluteTtlSeconds != null ? sessionAbsoluteTtlSeconds : sessionTtlSeconds;
             return new NapServerOptions(
                     challengeStore, sessionStore, aclResolver, eventReplayGuard, clock, random,
-                    challengeTtlSeconds, sessionTtlSeconds, resultCacheTtlSeconds,
-                    maxClockSkewSeconds, lowerBoundGraceSeconds, upperBoundGraceSeconds
+                    challengeTtlSeconds, sessionTtlSeconds, idleTtl, absoluteTtl,
+                    resultCacheTtlSeconds, maxClockSkewSeconds,
+                    lowerBoundGraceSeconds, upperBoundGraceSeconds
             );
         }
     }

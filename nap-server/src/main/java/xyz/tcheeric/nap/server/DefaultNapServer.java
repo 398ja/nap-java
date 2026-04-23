@@ -132,13 +132,15 @@ final class DefaultNapServer implements NapServer {
             return VerifyCompletionOutcome.failure(NapErrorCode.NAP_COMPLETE_REDEEMED_CHALLENGE);
         }
 
+        long absoluteExpiryAt = now + options.sessionAbsoluteTtlSeconds();
+        long idleExpiresAt = Math.min(now + options.sessionIdleTtlSeconds(), absoluteExpiryAt);
         SessionRecord session = options.sessionStore().createForChallenge(SessionRecord.create(
                 base64Url(randomBytes(24)),
                 challenge.challengeId(),
                 base64Url(randomBytes(32)),
                 challenge.npub(), challenge.pubkey(),
                 aclDecision.roles(), aclDecision.permissions(),
-                now, now + options.sessionTtlSeconds()
+                now, now, idleExpiresAt, absoluteExpiryAt
         ));
 
         RedeemResult redeemResult = options.challengeStore().redeem(challenge.challengeId(), new RedeemParams(
@@ -178,7 +180,7 @@ final class DefaultNapServer implements NapServer {
     public AuthSuccessResponse toPublicAuthSuccess(SessionRecord session) {
         return new AuthSuccessResponse(
                 "ok",
-                session.accessToken(), "Bearer", session.expiresAt(),
+                session.accessToken(), "Bearer", session.expiresAt(), session.absoluteExpiryAt(),
                 new AuthSuccessResponse.Principal(session.principalNpub(), session.principalPubkey()),
                 session.roles(), session.permissions()
         );

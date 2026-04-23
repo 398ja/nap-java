@@ -242,6 +242,77 @@ class InMemoryStoreTest {
             assertThat(store.getBySessionId("s2")).isEmpty();
             assertThat(store.getBySessionId("s3")).isPresent();
         }
+
+        // ── Spec 006: sliding-window touch ────────────────────────────────
+
+        @Test
+        void touch_advancesLastActivityAndExpiresAtOnActiveSession() {
+            // Arrange — back-compat session() helper gives lastActivityAt=issuedAt, absoluteExpiryAt=expiresAt.
+            // To test sliding we need headroom between expiresAt and absoluteExpiryAt.
+            var record = SessionRecord.create(
+                    "s1", "c1", "token-s1",
+                    "npub1test", "pubkey-abc",
+                    List.of("user"), List.of("read"),
+                    NOW, NOW, NOW + 60, NOW + 3600
+            );
+            store.createForChallenge(record);
+
+            // Act
+            store.touch("s1", NOW + 30, NOW + 30 + 60);
+
+            // Assert
+            var after = store.getBySessionId("s1").orElseThrow();
+            assertThat(after.lastActivityAt()).isEqualTo(NOW + 30);
+            assertThat(after.expiresAt()).isEqualTo(NOW + 90);
+            assertThat(after.absoluteExpiryAt()).isEqualTo(NOW + 3600);
+        }
+
+        @Test
+        void touch_clampsExpiresAtToAbsoluteExpiry() {
+            // Arrange — absolute cap only 10 seconds away.
+            var record = SessionRecord.create(
+                    "s1", "c1", "token-s1",
+                    "npub1test", "pubkey-abc",
+                    List.of("user"), List.of("read"),
+                    NOW, NOW, NOW + 5, NOW + 10
+            );
+            store.createForChallenge(record);
+
+            // Act — caller asks for an expiry 1 hour in the future.
+            store.touch("s1", NOW + 1, NOW + 3600);
+
+            // Assert — capped at absolute_expiry_at.
+            var after = store.getBySessionId("s1").orElseThrow();
+            assertThat(after.expiresAt()).isEqualTo(NOW + 10);
+        }
+
+        @Test
+        void touch_isNoOpWhenSessionRevoked() {
+            // Arrange
+            var record = SessionRecord.create(
+                    "s1", "c1", "token-s1",
+                    "npub1test", "pubkey-abc",
+                    List.of("user"), List.of("read"),
+                    NOW, NOW, NOW + 60, NOW + 3600
+            );
+            store.createForChallenge(record);
+            store.revokeBySessionId("s1", NOW);
+
+            // Act
+            store.touch("s1", NOW + 30, NOW + 90);
+
+            // Assert — session remains revoked; touch did NOT un-revoke.
+            assertThat(store.getBySessionId("s1")).isEmpty();
+        }
+
+        @Test
+        void touch_isNoOpWhenSessionAbsent() {
+            // Act — touching a session that was never created must not throw.
+            store.touch("ghost", NOW + 1, NOW + 60);
+
+            // Assert
+            assertThat(store.getBySessionId("ghost")).isEmpty();
+        }
     }
 
     // ================================================================== AclStore
