@@ -9,16 +9,23 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import xyz.tcheeric.nap.core.AuthInitRequest;
+import xyz.tcheeric.nap.core.SessionRecord;
+import xyz.tcheeric.nap.core.SessionStore;
 import xyz.tcheeric.nap.server.*;
 import xyz.tcheeric.nap.spring.config.NapProperties;
 import xyz.tcheeric.nap.spring.filter.NapServletFilter;
 
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
 
 /**
  * NAP v2 authentication endpoints: init, complete, session, logout.
+ *
+ * <p>{@code GET /api/v1/auth/session} implements the spec-006 sliding-window
+ * contract: on success it advances the session's {@code last_activity_at} and
+ * returns {@code {pubkey, expires_at, absolute_expiry_at}}. On failure it
+ * returns {@code 401 {error, reason}} with {@code reason=expired|invalid}.
  */
 @RestController
 @RequestMapping("/api/v1/auth")
@@ -27,11 +34,14 @@ public class NapAuthController {
     private static final Logger log = LoggerFactory.getLogger(NapAuthController.class);
 
     private final NapServer napServer;
+    private final SessionStore sessionStore;
     private final NapProperties properties;
     private final ObjectMapper objectMapper;
 
-    public NapAuthController(NapServer napServer, NapProperties properties, ObjectMapper objectMapper) {
+    public NapAuthController(NapServer napServer, SessionStore sessionStore,
+                             NapProperties properties, ObjectMapper objectMapper) {
         this.napServer = napServer;
+        this.sessionStore = sessionStore;
         this.properties = properties;
         this.objectMapper = objectMapper;
     }
@@ -100,27 +110,58 @@ public class NapAuthController {
         };
     }
 
+    /**
+     * Validate the session cookie, slide its idle window, and return the
+     * pubkey + expiries. On any failure return {@code 401} with a typed
+     * {@code reason} so the client can display the correct end-reason copy.
+     */
     @GetMapping("/session")
     public ResponseEntity<?> checkSession(HttpServletRequest request) {
         String sessionId = extractCookie(request);
         if (sessionId == null) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(Map.of("status", "error", "message", "No session"));
+            return sessionEnded("invalid");
         }
 
-        // Note: session validation is handled through the NapSessionFilter
-        return ResponseEntity.ok(Map.of("status", "ok"));
+        SessionRecord record = sessionStore.getBySessionId(sessionId).orElse(null);
+        if (record == null) {
+            return sessionEnded("invalid");
+        }
+        if (record.revokedAt() != null) {
+            return sessionEnded("invalid");
+        }
+
+        long now = Instant.now().getEpochSecond();
+        if (record.expiresAt() <= now || record.absoluteExpiryAt() <= now) {
+            return sessionEnded("expired");
+        }
+
+        // Slide the idle window: advance last_activity_at to `now` and bump
+        // expires_at forward to `now + idleTtl`, capped at absolute_expiry_at.
+        long idleTtl = properties.sessionIdleTtlSeconds();
+        long newExpiresAt = Math.min(now + idleTtl, record.absoluteExpiryAt());
+        sessionStore.touch(record.sessionId(), now, newExpiresAt);
+
+        return ResponseEntity.ok(Map.of(
+                "pubkey", record.principalPubkey(),
+                "expires_at", newExpiresAt,
+                "absolute_expiry_at", record.absoluteExpiryAt()
+        ));
     }
 
     @PostMapping("/logout")
-    @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void logout(HttpServletRequest request, HttpServletResponse response) {
+    public ResponseEntity<Void> logout(HttpServletRequest request, HttpServletResponse response) {
         String sessionId = extractCookie(request);
         if (sessionId != null) {
+            sessionStore.revokeBySessionId(sessionId, Instant.now().getEpochSecond());
             log.info("nap_logout");
         }
-
         clearCookie(response);
+        return ResponseEntity.noContent().build();
+    }
+
+    private ResponseEntity<Map<String, Object>> sessionEnded(String reason) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(Map.of("error", "session_ended", "reason", reason));
     }
 
     private void setCookie(HttpServletResponse response, String sessionId) {

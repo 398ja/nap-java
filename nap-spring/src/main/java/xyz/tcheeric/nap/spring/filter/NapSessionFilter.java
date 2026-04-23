@@ -106,7 +106,9 @@ public class NapSessionFilter extends OncePerRequestFilter {
                 aclDecision.roles(),
                 aclDecision.permissions(),
                 record.issuedAt(),
+                record.lastActivityAt(),
                 record.expiresAt(),
+                record.absoluteExpiryAt(),
                 record.revokedAt(),
                 record.stepUpToken(),
                 record.stepUpExpiresAt()
@@ -131,7 +133,10 @@ public class NapSessionFilter extends OncePerRequestFilter {
 
     private boolean isExpired(SessionRecord record) {
         long now = Instant.now().getEpochSecond();
-        return record.revokedAt() != null || record.expiresAt() <= now;
+        // Either the sliding (idle) deadline or the absolute cap triggers expiry.
+        return record.revokedAt() != null
+                || record.expiresAt() <= now
+                || record.absoluteExpiryAt() <= now;
     }
 
     private AclDecision resolveAcl(SessionRecord session) {

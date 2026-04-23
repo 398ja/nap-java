@@ -46,7 +46,8 @@ public final class InMemorySessionStore implements SessionStore {
                     existing.sessionId(), existing.challengeId(), existing.accessToken(),
                     existing.principalNpub(), existing.principalPubkey(),
                     existing.roles(), existing.permissions(),
-                    existing.issuedAt(), existing.expiresAt(), nowUnix,
+                    existing.issuedAt(), existing.lastActivityAt(),
+                    existing.expiresAt(), existing.absoluteExpiryAt(), nowUnix,
                     existing.stepUpToken(), existing.stepUpExpiresAt()
             );
             byAccessToken.put(existing.accessToken(), revoked);
@@ -64,6 +65,26 @@ public final class InMemorySessionStore implements SessionStore {
             }
         }
         return count;
+    }
+
+    @Override
+    public void touch(String sessionId, long newLastActivityAt, long newExpiresAt) {
+        bySessionId.computeIfPresent(sessionId, (key, existing) -> {
+            if (existing.revokedAt() != null) return existing;
+            if (existing.absoluteExpiryAt() <= newLastActivityAt) return existing;
+            // Never extend past the absolute cap, even if the caller asks us to.
+            long clampedExpiresAt = Math.min(newExpiresAt, existing.absoluteExpiryAt());
+            var touched = new SessionRecord(
+                    existing.sessionId(), existing.challengeId(), existing.accessToken(),
+                    existing.principalNpub(), existing.principalPubkey(),
+                    existing.roles(), existing.permissions(),
+                    existing.issuedAt(), newLastActivityAt,
+                    clampedExpiresAt, existing.absoluteExpiryAt(), existing.revokedAt(),
+                    existing.stepUpToken(), existing.stepUpExpiresAt()
+            );
+            byAccessToken.put(existing.accessToken(), touched);
+            return touched;
+        });
     }
 
     public void clear() {

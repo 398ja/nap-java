@@ -1,6 +1,7 @@
 package xyz.tcheeric.nap.spring.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.Cookie;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -9,14 +10,17 @@ import xyz.tcheeric.nap.core.AuthFailureResponse;
 import xyz.tcheeric.nap.core.AuthInitResponse;
 import xyz.tcheeric.nap.core.AuthSuccessResponse;
 import xyz.tcheeric.nap.core.SessionRecord;
+import xyz.tcheeric.nap.core.SessionStore;
 import xyz.tcheeric.nap.server.IssueChallengeInput;
 import xyz.tcheeric.nap.server.IssueChallengeResult;
 import xyz.tcheeric.nap.server.NapServer;
 import xyz.tcheeric.nap.server.VerifyCompletionInput;
 import xyz.tcheeric.nap.server.VerifyCompletionOutcome;
+import xyz.tcheeric.nap.server.store.InMemorySessionStore;
 import xyz.tcheeric.nap.spring.config.NapProperties;
 import xyz.tcheeric.nap.spring.filter.NapServletFilter;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -28,24 +32,31 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Verifies auth completion preserves Authorization-header compatibility while supporting body proof fallback.
+ * Verifies auth completion, session sliding/reason-typed 401 (spec 006), and logout cookie clear.
  */
 class NapAuthControllerTest {
 
     private final NapServer napServer = mock(NapServer.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final SessionStore sessionStore = new InMemorySessionStore();
     private final NapProperties properties = new NapProperties(
             true,
             "https://account.imani.casa",
-            60,
-            3600,
-            30,
-            60,
-            600,
-            300,
+            60,     // challengeTtlSeconds
+            3600,   // sessionTtlSeconds (legacy)
+            900,    // sessionIdleTtlSeconds (spec 006 — 15 min)
+            43200,  // sessionAbsoluteTtlSeconds (spec 006 — 12 h)
+            30,     // resultCacheTtlSeconds
+            60,     // maxClockSkewSeconds
+            600,    // stepUpTtlSeconds
+            300,    // aclRefreshIntervalSeconds
             List.of("/internal/v1/merchants"),
-            new NapProperties.CookieProperties("merchant_session", true, true, "Lax", "/", "", 3600)
+            new NapProperties.CookieProperties("merchant_session", true, true, "Lax", "/", "", 43200)
     );
+
+    private NapAuthController controller() {
+        return new NapAuthController(napServer, sessionStore, properties, objectMapper);
+    }
 
     @Test
     void complete_usesBodyProofWhenAuthorizationHeaderIsMissing() {
@@ -56,30 +67,22 @@ class NapAuthControllerTest {
         request.setAttribute(NapServletFilter.RAW_BODY_ATTRIBUTE, requestBody.getBytes());
         MockHttpServletResponse response = new MockHttpServletResponse();
 
+        long now = 1_700_000_000L;
         SessionRecord session = SessionRecord.create(
-                "session-1",
-                "challenge-123",
-                "access-token",
-                "npub1test",
-                "a".repeat(64),
-                List.of("merchant"),
-                List.of("read"),
-                1_700_000_000L,
-                1_700_003_600L
+                "session-1", "challenge-123", "access-token",
+                "npub1test", "a".repeat(64),
+                List.of("merchant"), List.of("read"),
+                now, now, now + 900, now + 43200
         );
         when(napServer.verifyCompletion(any())).thenReturn(VerifyCompletionOutcome.success(session));
         when(napServer.toPublicAuthSuccess(session)).thenReturn(new AuthSuccessResponse(
-                "ok",
-                session.accessToken(),
-                "Bearer",
-                session.expiresAt(),
+                "ok", session.accessToken(), "Bearer",
+                session.expiresAt(), session.absoluteExpiryAt(),
                 new AuthSuccessResponse.Principal(session.principalNpub(), session.principalPubkey()),
-                session.roles(),
-                session.permissions()
+                session.roles(), session.permissions()
         ));
 
-        NapAuthController controller = new NapAuthController(napServer, properties, objectMapper);
-        Object body = controller.complete(false, request, response).getBody();
+        Object body = controller().complete(false, request, response).getBody();
 
         var captor = forClass(VerifyCompletionInput.class);
         verify(napServer).verifyCompletion(captor.capture());
@@ -94,7 +97,6 @@ class NapAuthControllerTest {
 
     @Test
     void init_validNpub_returnsSuccess() {
-        // Arrange
         AuthInitResponse initResponse = new AuthInitResponse(
                 "challenge-1", "nip98-challenge", "https://account.imani.casa/api/v1/auth/complete",
                 "NIP-98", 1_700_000_000L, 1_700_000_060L
@@ -102,49 +104,33 @@ class NapAuthControllerTest {
         when(napServer.issueChallenge(any(IssueChallengeInput.class)))
                 .thenReturn(new IssueChallengeResult.Success(initResponse));
 
-        NapAuthController controller = new NapAuthController(napServer, properties, objectMapper);
+        ResponseEntity<?> response = controller().init(Map.of("npub", "npub1testpubkey"));
 
-        // Act
-        ResponseEntity<?> response = controller.init(Map.of("npub", "npub1testpubkey"));
-
-        // Assert
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         assertThat(response.getBody()).isNotNull();
     }
 
     @Test
     void init_missingNpubAndPubkey_returnsBadRequest() {
-        // Arrange
-        NapAuthController controller = new NapAuthController(napServer, properties, objectMapper);
-
-        // Act
-        ResponseEntity<?> response = controller.init(Map.of());
-
-        // Assert
+        ResponseEntity<?> response = controller().init(Map.of());
         assertThat(response.getStatusCode().value()).isEqualTo(400);
     }
 
     @Test
     void complete_malformedBody_returnsBadRequest() {
-        // Arrange
         when(napServer.verifyCompletion(any())).thenReturn(VerifyCompletionOutcome.malformed());
 
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/auth/complete");
         request.setAttribute(NapServletFilter.RAW_BODY_ATTRIBUTE, "{}".getBytes());
         MockHttpServletResponse servletResponse = new MockHttpServletResponse();
 
-        NapAuthController controller = new NapAuthController(napServer, properties, objectMapper);
+        ResponseEntity<?> response = controller().complete(false, request, servletResponse);
 
-        // Act
-        ResponseEntity<?> response = controller.complete(false, request, servletResponse);
-
-        // Assert
         assertThat(response.getStatusCode().value()).isEqualTo(400);
     }
 
     @Test
     void complete_failure_returnsUnauthorized() {
-        // Arrange
         when(napServer.verifyCompletion(any()))
                 .thenReturn(new VerifyCompletionOutcome.Failure(
                         xyz.tcheeric.nap.core.NapErrorCode.NAP_COMPLETE_INVALID_SIGNATURE, false));
@@ -155,43 +141,152 @@ class NapAuthControllerTest {
         request.setAttribute(NapServletFilter.RAW_BODY_ATTRIBUTE, "{}".getBytes());
         MockHttpServletResponse servletResponse = new MockHttpServletResponse();
 
-        NapAuthController controller = new NapAuthController(napServer, properties, objectMapper);
+        ResponseEntity<?> response = controller().complete(false, request, servletResponse);
 
-        // Act
-        ResponseEntity<?> response = controller.complete(false, request, servletResponse);
-
-        // Assert
         assertThat(response.getStatusCode().value()).isEqualTo(401);
     }
 
+    // -----------------------------------------------------------------
+    // /auth/session — spec-006 sliding-window + reason-typed 401
+    // -----------------------------------------------------------------
+
     @Test
-    void checkSession_noCookie_returnsUnauthorized() {
-        // Arrange
+    void checkSession_noCookie_returns401WithReasonInvalid() {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/auth/session");
 
-        NapAuthController controller = new NapAuthController(napServer, properties, objectMapper);
+        ResponseEntity<?> response = controller().checkSession(request);
 
-        // Act
-        ResponseEntity<?> response = controller.checkSession(request);
-
-        // Assert
         assertThat(response.getStatusCode().value()).isEqualTo(401);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsEntry("error", "session_ended");
+        assertThat(body).containsEntry("reason", "invalid");
     }
 
     @Test
-    void logout_clearsCookie() {
-        // Arrange
+    void checkSession_unknownCookie_returns401WithReasonInvalid() {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/auth/session");
+        request.setCookies(new Cookie("merchant_session", "does-not-exist"));
+
+        ResponseEntity<?> response = controller().checkSession(request);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(401);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsEntry("reason", "invalid");
+    }
+
+    @Test
+    void checkSession_expiredSession_returns401WithReasonExpired() {
+        long past = Instant.now().getEpochSecond() - 1_000;
+        SessionRecord expired = SessionRecord.create(
+                "sid-expired", "chal", "token",
+                "npub", "b".repeat(64),
+                List.of(), List.of(),
+                past - 3600, past - 3600, past - 600, past - 600
+        );
+        sessionStore.createForChallenge(expired);
+
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/auth/session");
+        request.setCookies(new Cookie("merchant_session", "sid-expired"));
+
+        ResponseEntity<?> response = controller().checkSession(request);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(401);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsEntry("reason", "expired");
+    }
+
+    @Test
+    void checkSession_validSession_slidesIdleWindowAndReturnsPubkey() {
+        long now = Instant.now().getEpochSecond();
+        long issuedAt = now - 60;            // session 1 minute old
+        long lastActivity = issuedAt;
+        long oldIdleExpiry = issuedAt + 300; // expires in ~4 more minutes under old window
+        long absoluteExpiry = issuedAt + 43200;
+        SessionRecord active = SessionRecord.create(
+                "sid-active", "chal-a", "token-a",
+                "npub-a", "c".repeat(64),
+                List.of("merchant"), List.of("read"),
+                issuedAt, lastActivity, oldIdleExpiry, absoluteExpiry
+        );
+        sessionStore.createForChallenge(active);
+
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/auth/session");
+        request.setCookies(new Cookie("merchant_session", "sid-active"));
+
+        ResponseEntity<?> response = controller().checkSession(request);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsEntry("pubkey", "c".repeat(64));
+        assertThat(body).containsEntry("absolute_expiry_at", absoluteExpiry);
+        // expires_at must have slid FORWARD past the original window and also
+        // not exceed the absolute cap.
+        long newExpiresAt = ((Number) body.get("expires_at")).longValue();
+        assertThat(newExpiresAt).isGreaterThan(oldIdleExpiry);
+        assertThat(newExpiresAt).isLessThanOrEqualTo(absoluteExpiry);
+
+        // The store must reflect the slide.
+        SessionRecord after = sessionStore.getBySessionId("sid-active").orElseThrow();
+        assertThat(after.lastActivityAt()).isGreaterThanOrEqualTo(now);
+        assertThat(after.expiresAt()).isEqualTo(newExpiresAt);
+    }
+
+    @Test
+    void checkSession_slide_isCappedByAbsoluteExpiry() {
+        long now = Instant.now().getEpochSecond();
+        // Session whose absolute cap is only 2 minutes in the future, but idleTtl
+        // is 15 min. The slide MUST NOT extend expiresAt past absoluteExpiryAt.
+        long absoluteExpiry = now + 120;
+        SessionRecord narrow = SessionRecord.create(
+                "sid-narrow", "chal-n", "token-n",
+                "npub-n", "d".repeat(64),
+                List.of(), List.of(),
+                now - 3600, now - 60, now + 60, absoluteExpiry
+        );
+        sessionStore.createForChallenge(narrow);
+
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/auth/session");
+        request.setCookies(new Cookie("merchant_session", "sid-narrow"));
+
+        ResponseEntity<?> response = controller().checkSession(request);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        long newExpiresAt = ((Number) body.get("expires_at")).longValue();
+        assertThat(newExpiresAt).isEqualTo(absoluteExpiry);
+    }
+
+    // -----------------------------------------------------------------
+    // /auth/logout
+    // -----------------------------------------------------------------
+
+    @Test
+    void logout_clearsCookieAndRevokesSession() {
+        long now = Instant.now().getEpochSecond();
+        SessionRecord live = SessionRecord.create(
+                "sid-live", "chal-l", "token-l",
+                "npub-l", "e".repeat(64),
+                List.of(), List.of(),
+                now - 60, now - 60, now + 900, now + 43200
+        );
+        sessionStore.createForChallenge(live);
+
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/auth/logout");
+        request.setCookies(new Cookie("merchant_session", "sid-live"));
         MockHttpServletResponse response = new MockHttpServletResponse();
 
-        NapAuthController controller = new NapAuthController(napServer, properties, objectMapper);
+        ResponseEntity<Void> result = controller().logout(request, response);
 
-        // Act
-        controller.logout(request, response);
-
-        // Assert
-        jakarta.servlet.http.Cookie cookie = response.getCookie("merchant_session");
+        assertThat(result.getStatusCode().value()).isEqualTo(204);
+        Cookie cookie = response.getCookie("merchant_session");
         assertThat(cookie).isNotNull();
         assertThat(cookie.getMaxAge()).isEqualTo(0);
+        // Session is revoked in the store — subsequent getBySessionId filters it out.
+        assertThat(sessionStore.getBySessionId("sid-live")).isEmpty();
     }
 }
